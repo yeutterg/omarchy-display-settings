@@ -28,4 +28,8 @@ jobs:
       - name: Check whitespace
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: git diff --check "$BASE_SHA..HEAD"
+        run: |
+          if ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            BASE_SHA=$(git rev-parse HEAD^ 2>/dev/null || git hash-object -t tree /dev/null)
+          fi
+          git diff --check "$BASE_SHA..HEAD"
