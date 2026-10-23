@@ -20,5 +20,6 @@ for (const kind of manifest.kinds) {
 }
 
 assert.ok(["left", "center", "right"].includes(manifest.barWidget.defaultSection))
+assert.ok(!manifest.kinds.includes("overlay"), "identify UI must stay inside the bar widget so Display shortcuts open the panel")
 
 console.log("manifest tests passed")

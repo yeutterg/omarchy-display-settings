@@ -1,10 +1,11 @@
 import QtQuick
 import Quickshell
+import Quickshell.Hyprland
 import Quickshell.Io
 
 Item {
   id: root
-  property string moduleName: "io.github.bmontythe3rd.display-manager"
+  property string moduleName: "io.github.yeutterg.display-settings"
   property string helperPath: Quickshell.env("HOME") + "/.config/omarchy/plugins/" + moduleName + "/bin/display-manager"
   property string lastTopology: ""
   property string pendingTopology: ""
@@ -19,6 +20,19 @@ Item {
   Component.onCompleted: checkTopology()
 
   Timer { interval: 4000; running: true; repeat: true; onTriggered: root.checkTopology() }
+  Timer { id: reloadTimer; interval: 250; repeat: false; onTriggered: root.checkTopology() }
+
+  Connections {
+    target: Hyprland
+    function onRawEvent(event) {
+      if (!event || String(event.name) !== "configreloaded") return
+      // A reload can re-run monitor rules without changing the connected
+      // topology. Forget the last match so the verified profile is checked
+      // again instead of treating the unchanged connector list as sufficient.
+      root.lastTopology = ""
+      reloadTimer.restart()
+    }
+  }
 
   Process {
     id: topologyProc

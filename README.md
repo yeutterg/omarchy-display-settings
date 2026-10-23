@@ -1,114 +1,115 @@
-# Omarchy Display Manager
+# Omarchy Display Settings
 
-A native Omarchy Quickshell companion for arranging and configuring multiple
-monitors with the ease of Windows Display Settings.
+A native replacement for Omarchy's Display panel with visual monitor
+arrangement, per-display settings, and safe dock profiles.
 
-<p align="center">
-  <img src="docs/screenshots/screenshot-2026-08-12_23-16-43.png" alt="Display Manager arranging two connected displays with resolution, refresh rate, orientation, scale, and connection controls" width="100%">
-</p>
+This plugin is based on Bryan Montgomery's MIT-licensed
+[Omarchy Display Manager](https://github.com/Bmontythe3rd/omarchy-display-manager).
+It integrates that project's arrangement and rollback model into the stock
+Display-panel role, then adds per-display brightness and UI/text scale controls.
+
+![Omarchy Display Settings panel](preview.png)
 
 ## Features
 
-- Drag displays into position on a visual desktop canvas.
-- Identify each physical display with a numbered full-screen overlay.
-- Choose resolution, refresh rate, orientation, and valid fractional scales.
-- Extend, duplicate, connect, and disconnect displays.
-- Preview every change with a 15-second automatic rollback.
-- Save a default profile for each exact dock or monitor topology.
-- Automatically restore the matching profile after a hotplug or login.
-- Follow the active Omarchy theme through the shell's shared UI components.
+- Drag displays into position on a proportional desktop canvas with magnetic
+  edge and alignment snapping.
+- Select any display and independently set its resolution, refresh rate,
+  orientation, compositor scale, mirroring, and connected state.
+- Identify physical displays with numbered, named full-screen overlays.
+- Apply panel changes immediately and expose an Undo button for restoring the
+  preceding brightness value or verified layout.
+- Remember one automatic layout for each exact connected-monitor topology and
+  restore it after login or hotplug.
+- Show brightness controls for every display supported by the internal,
+  Apple-display, or DDC brightness backends.
+- Put every connected display's brightness control at the top of a compact,
+  native Omarchy-style panel.
+- Move Night Light into the Display panel with an immediate on/off control and
+  expandable color-temperature and daily schedule controls.
+- Keep the visual arrangement canvas collapsed until needed, followed by a
+  separate settings section for each connected display.
+- Control UI and text size independently through each display's compositor
+  scale using the same pill-button treatment as Omarchy's stock zoom controls.
+- Use readable hardware names such as Apple Studio Display and Built-in
+  Display throughout the panel.
 
-The plugin is an advanced companion to Omarchy's built-in Display widget. It
-does not replace brightness or global text-size controls and does not modify
-`~/.config/hypr/monitors.lua`.
+## Safety and privacy
 
-## Requirements
+The plugin runs as the current user and requires no root access or additional
+packages. It makes no network requests and stores only monitor fingerprints and
+display settings under `~/.local/state/omarchy-display-settings/`.
 
-- Omarchy 4 (Quattro) with its bundled Quickshell plugin host
-- Hyprland 0.55 or newer
-- `hyprctl`, `jq`, `socat`, systemd user services, and
-  `omarchy-notification-send` (all included with Omarchy)
+Before applying a layout, the helper rejects configurations that:
 
-The plugin needs no root privileges and installs no additional packages.
+- disable every display;
+- contain duplicate or overlapping extended displays;
+- use invalid modes, scales, transforms, or mirror targets; or
+- omit required values.
+
+Automatic application uses Lua-safe `hyprctl eval` calls. The helper reads the
+live compositor state back after each modeset and restores the captured layout
+if the hardware did not accept the requested settings. A transient systemd user
+timer protects the operation while it is being verified; after success, the
+snapshot becomes the state restored by **Undo**.
+
+Night Light scheduling uses Hyprsunset's native time profiles and its user
+systemd service. Enabling a schedule preserves the preceding configuration as
+`~/.config/hypr/hyprsunset.conf.pre-display-settings`; disabling the schedule
+restores that file. The chosen schedule is saved in the plugin's gitignored
+`settings.json`, keeping machine preferences out of the plugin's source history.
+
+The helper serializes display operations and pauses automatic profile matching
+while a change is pending, so a shell rebuild or hotplug event cannot interrupt
+an in-progress modeset.
+
+After the plugin takes ownership of a verified profile, the helper replaces
+Omarchy's exact stock catch-all monitor rule in `~/.config/hypr/monitors.lua`
+with a managed block of explicit per-display rules and keeps a one-time
+`monitors.lua.pre-display-settings` backup. Hyprland therefore loads the
+verified positions and scales synchronously during configuration reloads. The
+profile service also rechecks the saved layout after every reload and hotplug.
 
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/Bmontythe3rd/omarchy-display-manager.git --enable
+omarchy plugin add https://github.com/yeutterg/omarchy-display-settings --enable --yes
 ```
 
-It is placed in the bar's right section by default. Open its multi-monitor icon
-next to Omarchy's built-in Display control.
+The plugin declares `omarchy.monitor` as its source, so enabling it replaces the
+stock Display widget in place.
 
-For local development:
+## Dependencies
 
-```bash
-omarchy plugin add /absolute/path/to/omarchy-display-manager --enable
-omarchy restart shell
-```
-
-## Update
-
-Installed copies are git-managed. Review and install the latest upstream
-changes with:
-
-```bash
-omarchy plugin update io.github.bmontythe3rd.display-manager
-```
-
-The community marketplace reads this repository's `main` branch during its
-daily catalog refresh, so existing listings do not need to be resubmitted for
-each release. Users still choose when to update their installed copy.
-
-## Use
-
-1. Select a display by clicking its canvas tile or selector.
-2. Drag tiles to match the physical arrangement and choose display settings.
-3. Click **Apply**. If the result is usable, click **Keep changes** within 15
-   seconds; otherwise choose **Revert** or wait for automatic recovery.
-4. Kept changes are saved as the automatic `Default` profile for the connected
-   display set. Reconnecting that exact set applies the profile automatically.
-
-Profiles are stored at
-`${XDG_STATE_HOME:-~/.local/state}/omarchy-display-manager/profiles.json`.
-Removing the plugin does not remove this user data.
+Omarchy provides the required Quattro shell, Quickshell, Hyprland, Hyprsunset,
+`jq`, `flock`, and systemd user services. Brightness controls appear only when
+the relevant built-in, Apple-display, or DDC backend is available.
 
 ## Remove
 
-```bash
-omarchy plugin remove io.github.bmontythe3rd.display-manager --yes
-```
-
-Optionally remove saved profiles:
+If Night Light scheduling is enabled, turn it off in the panel first so the
+plugin restores the Hyprsunset configuration it backed up. Then return to
+Omarchy's stock Display widget:
 
 ```bash
-rm -r "${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-display-manager"
+omarchy plugin remove io.github.yeutterg.display-settings --yes
+omarchy plugin enable omarchy.monitor
+omarchy restart shell
 ```
 
-## Safety and privacy
-
-Display settings are applied locally through `hyprctl`. No telemetry or network
-requests are made. A pending layout is stored locally and a transient systemd
-user timer restores it after 15 seconds. The plugin refuses configurations that
-disable every monitor, contain duplicate or overlapping extended displays,
-target invalid mirrors, or omit required mode and scale values. Applied layouts
-are checked against Hyprland's live state before they can be confirmed or saved.
-
-As with all community plugins, inspect the source before installation. Omarchy
-plugins run as the current user and are not sandboxed.
+Removing the plugin does not change the active monitor layout. Its one-time
+`monitors.lua.pre-display-settings` backup and ordinary JSON topology profiles
+remain available under the paths documented above and may be removed manually.
 
 ## Development
 
 ```bash
 tests/run.sh
-qmllint -I /usr/share/omarchy/shell DisplayManager.qml ProfileService.qml IdentifyOverlay.qml
+/usr/lib/qt6/bin/qmllint -I /usr/share/omarchy/shell \
+  DisplayManager.qml ProfileService.qml IdentifyOverlay.qml
+omarchy-plugin-validate .
 ```
 
-The test suite uses a mocked `hyprctl`; it never changes the active display
-layout. Continuous integration runs the model, manifest, helper, and shell
-syntax checks for every pull request and push to `main`. See
-[CHANGELOG.md](CHANGELOG.md) for release history.
-
-## License
-
-[MIT](LICENSE)
+The test suite mocks `hyprctl` and systemd, so it does not change the active
+display layout. The original project and this derivative are licensed under
+the [MIT License](LICENSE).

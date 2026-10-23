@@ -2,17 +2,101 @@
 set -euo pipefail
 
 plugin_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-state_root=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-display-manager
+state_root=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-display-settings
 profiles_file=$state_root/profiles.json
 pending_file=$state_root/pending.json
+undo_file=$state_root/undo.json
+legacy_night_light_schedule_file=$state_root/night-light-schedule.json
+settings_file=${DISPLAY_MANAGER_SETTINGS_FILE:-$plugin_dir/settings.json}
 mkdir -p "$state_root"
 
 die() { printf '{"ok":false,"error":%s}\n' "$(jq -Rn --arg value "$*" '$value')" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"; }
 need jq
 need hyprctl
+need flock
+
+# Monitor changes rebuild per-output shell surfaces, which can start profile
+# matching while a preview is still awaiting confirmation. Serialize every
+# mutating helper invocation so preview, profile, confirmation, and rollback operations
+# cannot modify the compositor or state files concurrently.
+case ${1:-help} in
+  state|topology|brightness-state|undo-state|night-light-schedule-state) ;;
+  *)
+    exec 9>"$state_root/operation.lock"
+    flock -x 9
+    ;;
+esac
 
 monitors() { hyprctl -j monitors all; }
+
+monitor_rule() {
+  local row=$1 name mode x y scale transform mirror name_lua mode_lua position_lua mirror_lua expression
+  name=$(jq -r '.name' <<<"$row")
+  name_lua=$(jq -Rn --arg value "$name" '$value')
+  if [[ $(jq -r '.disabled // false' <<<"$row") == true ]]; then
+    printf 'hl.monitor({ output = %s, disabled = true })\n' "$name_lua"
+    return
+  fi
+
+  mode=$(jq -r '.mode // "preferred"' <<<"$row")
+  mode=${mode%Hz}
+  x=$(jq -r '.x // 0' <<<"$row")
+  y=$(jq -r '.y // 0' <<<"$row")
+  scale=$(jq -r '.scale // 1' <<<"$row")
+  transform=$(jq -r '.transform // 0' <<<"$row")
+  mirror=$(jq -r '.mirror // ""' <<<"$row")
+  mode_lua=$(jq -Rn --arg value "$mode" '$value')
+  position_lua=$(jq -Rn --arg value "${x}x${y}" '$value')
+  expression="hl.monitor({ output = $name_lua, mode = $mode_lua, position = $position_lua, scale = $scale, transform = $transform"
+  if [[ -n $mirror ]]; then
+    mirror_lua=$(jq -Rn --arg value "$mirror" '$value')
+    expression+=", mirror = $mirror_lua"
+  fi
+  printf '%s })\n' "$expression"
+}
+
+persist_monitor_rules() {
+  local config=$1
+  local monitor_lua=${XDG_CONFIG_HOME:-$HOME/.config}/hypr/monitors.lua
+  [[ -f $monitor_lua ]] || return 0
+
+  validate_config "$config"
+  # Hyprland reconstructs monitor state from configuration on every reload.
+  # Replace Omarchy's stock catch-all with a final managed block containing the
+  # last verified rules, and preserve the original file for manual recovery.
+  local fallback='hl.monitor({ output = "", mode = "preferred", position = "auto", scale = omarchy_monitor_scale })'
+  local begin='-- BEGIN Omarchy Display Settings managed monitor rules'
+  local end='-- END Omarchy Display Settings managed monitor rules'
+
+  cp -n "$monitor_lua" "$monitor_lua.pre-display-settings"
+  local tmp in_managed=false line row encoded
+  tmp=$(mktemp "$monitor_lua.XXXXXX")
+  while IFS= read -r line || [[ -n $line ]]; do
+    if [[ $line == "$begin" ]]; then in_managed=true; continue; fi
+    if $in_managed; then
+      [[ $line == "$end" ]] && in_managed=false
+      continue
+    fi
+    if [[ $line == "$fallback" ]]; then
+      printf '%s\n' '-- Display Settings uses the verified per-display rules below.' "-- $line"
+    else
+      printf '%s\n' "$line"
+    fi
+  done <"$monitor_lua" >"$tmp"
+  printf '%s\n' "$begin" >>"$tmp"
+  while IFS= read -r encoded; do
+    row=$(base64 -d <<<"$encoded")
+    monitor_rule "$row" >>"$tmp"
+  done < <(jq -r '.[] | @base64' <<<"$config")
+  printf '%s\n' "$end" >>"$tmp"
+  chmod --reference="$monitor_lua" "$tmp"
+  if cmp -s "$tmp" "$monitor_lua"; then
+    rm -f "$tmp"
+    return
+  fi
+  mv "$tmp" "$monitor_lua"
+}
 
 fingerprint_filter='def fp: [(.make // ""), (.model // ""), (.serial // "")] | map(select(length > 0)) | if length > 0 then join("|") else (.name // "unknown") end;'
 
@@ -31,6 +115,63 @@ state() {
 
 topology() {
   state | jq -c '[.[].fingerprint] | sort | join("::")'
+}
+
+brightness_state() {
+  need omarchy-brightness-display
+  local result='[]' name value
+  while IFS= read -r name; do
+    value=$(omarchy-brightness-display --monitor "$name" 2>/dev/null || true)
+    if [[ $value =~ ^[0-9]+$ ]] && (( value >= 0 && value <= 100 )); then
+      result=$(jq -c --arg name "$name" --argjson value "$value" \
+        '. + [{name:$name,available:true,value:$value}]' <<<"$result")
+    else
+      result=$(jq -c --arg name "$name" \
+        '. + [{name:$name,available:false,value:0}]' <<<"$result")
+    fi
+  done < <(monitors | jq -r '.[] | select(.disabled != true) | .name')
+  printf '%s\n' "$result"
+}
+
+night_light_temperature() {
+  local output
+  output=$(hyprctl hyprsunset temperature 2>/dev/null) || return 1
+  grep -oE '[0-9]+' <<<"$output" | head -n1
+}
+
+night_light_set() {
+  local target=${1:-}
+  [[ $target =~ ^[0-9]+$ ]] && (( target >= 2500 && target <= 6500 )) \
+    || die "Night Light temperature must be between 2500 and 6500 K"
+
+  if ! night_light_temperature >/dev/null; then
+    # Only one hyprsunset process may own Hyprland's CTM manager. A process can
+    # survive after losing its IPC socket, so pgrep alone is not a health check.
+    pkill -x hyprsunset >/dev/null 2>&1 || true
+    if [[ $(night_light_schedule_state | jq -r '.enabled') == true ]]; then
+      need systemctl
+      systemctl --user reset-failed hyprsunset.service >/dev/null 2>&1 || true
+      systemctl --user start hyprsunset.service >/dev/null 2>&1 \
+        || die "Could not start Night Light"
+    else
+      need uwsm-app
+      setsid uwsm-app -- hyprsunset >/dev/null 2>&1 &
+    fi
+  fi
+
+  local current
+  for _ in {1..15}; do
+    hyprctl hyprsunset temperature "$target" >/dev/null 2>&1 || true
+    sleep 0.2
+    current=$(night_light_temperature || true)
+    if [[ $current == "$target" ]]; then
+      command -v omarchy-shell >/dev/null 2>&1 && omarchy-shell -q nightlight refresh || true
+      jq -cn --argjson temperature "$target" \
+        '{ok:true,temperature:$temperature,enabled:($temperature < 6000)}'
+      return
+    fi
+  done
+  die "Night Light did not reach ${target} K"
 }
 
 validate_config() {
@@ -52,6 +193,27 @@ validate_config() {
            width: (($width / $display.scale) | round),
            height: (($height / $display.scale) | round)}
         end;
+    def touches($left; $right):
+      (((($left.x + $left.width) == $right.x) or (($right.x + $right.width) == $left.x))
+        and ($left.y < ($right.y + $right.height))
+        and (($left.y + $left.height) > $right.y))
+      or
+      (((($left.y + $left.height) == $right.y) or (($right.y + $right.height) == $left.y))
+        and ($left.x < ($right.x + $right.width))
+        and (($left.x + $left.width) > $right.x));
+    def grow($rects):
+      . as $seen
+      | reduce range(0; $rects | length) as $candidate
+          ($seen;
+           if index($candidate) != null then .
+           elif any($seen[]; . as $seen_index
+             | touches($rects[$candidate]; $rects[$seen_index])) then . + [$candidate]
+           else . end);
+    def connected($rects):
+      ($rects | length) <= 1
+      or ([0]
+        | until((. as $seen | (grow($rects) | length) == ($seen | length)); grow($rects))
+        | length == ($rects | length));
     . as $config
     | type == "array" and length > 0
     and (map(select(.disabled != true)) | length) > 0
@@ -73,7 +235,7 @@ validate_config() {
               .name == $target and .disabled != true and (.mirror // "") == "")))
       )))
     and ([.[] | select(.disabled != true and (.mirror // "") == "") | logical_rect] as $rects
-      | all(range(0; $rects | length);
+      | (all(range(0; $rects | length);
           . as $left
           | all(range($left + 1; $rects | length);
             . as $right
@@ -81,14 +243,42 @@ validate_config() {
             ($rects[$left].x >= ($rects[$right].x + $rects[$right].width))
             or (($rects[$left].x + $rects[$left].width) <= $rects[$right].x)
             or ($rects[$left].y >= ($rects[$right].y + $rects[$right].height))
-            or (($rects[$left].y + $rects[$left].height) <= $rects[$right].y))))
+            or (($rects[$left].y + $rects[$left].height) <= $rects[$right].y)))
+        and connected($rects)))
   ' <<<"$config" >/dev/null \
     || die "Invalid display configuration"
 }
 
+config_matches_state() {
+  local requested=$1 live=${2:-$(state)}
+  jq -en --argjson requested "$requested" --argjson live "$live" '
+    def dimensions:
+      (.mode // "") | capture("^(?<width>[0-9]+)x(?<height>[0-9]+)@(?<refresh>[0-9.]+)");
+    ($requested | length) == ($live | length)
+    and all($requested[];
+      . as $want
+      | ($live | map(select(.name == $want.name)) | first // null) as $got
+      | if $got == null then false
+        elif $want.disabled == true then $got.disabled == true
+        else
+          ($want | dimensions) as $mode
+          | ($want.mirror // "") as $wanted_mirror
+          | $got.disabled != true
+          and $got.width == ($mode.width | tonumber)
+          and $got.height == ($mode.height | tonumber)
+          and (($got.refresh - ($mode.refresh | tonumber)) | fabs) <= 0.25
+          and (($got.scale - $want.scale) | fabs) <= 0.01
+          and $got.transform == $want.transform
+          and $got.mirror == $wanted_mirror
+          and (($wanted_mirror != "") or ($got.x == $want.x and $got.y == $want.y))
+        end)
+  ' >/dev/null
+}
+
 apply_config() {
-  local config=$1 expression
+  local config=$1 expression live_before
   validate_config "$config"
+  live_before=$(state)
   while IFS= read -r encoded; do
     local row name name_lua
     row=$(base64 -d <<<"$encoded")
@@ -110,6 +300,17 @@ apply_config() {
       mirror=$(jq -r '.mirror // ""' <<<"$row")
       mode_lua=$(jq -Rn --arg value "$mode" '$value')
       position_lua=$(jq -Rn --arg value "${x}x${y}" '$value')
+      # Hyprland can ignore a fractional scale when it arrives together with
+      # an explicit position. Omarchy's own scale command stages the scale at
+      # an automatic position first; the final rule below then places it at
+      # the requested attached edge.
+      local live_scale
+      live_scale=$(jq -r --arg name "$name" '.[] | select(.name == $name) | .scale // empty' <<<"$live_before")
+      if [[ -n $live_scale ]] && awk -v current="$live_scale" -v wanted="$scale" \
+          'BEGIN { difference = current - wanted; if (difference < 0) difference = -difference; exit !(difference > 0.01) }'; then
+        hyprctl eval "hl.monitor({ output = $name_lua, mode = $mode_lua, position = \"auto\", scale = $scale, transform = $transform })" >/dev/null \
+          || die "Hyprland rejected scale $scale for $name"
+      fi
       expression="hl.monitor({ output = $name_lua, mode = $mode_lua, position = $position_lua, scale = $scale, transform = $transform"
       if [[ -n $mirror ]]; then
         mirror_lua=$(jq -Rn --arg value "$mirror" '$value')
@@ -160,16 +361,16 @@ apply_config() {
 }
 
 cancel_rollback() {
-  systemctl --user stop omarchy-display-manager-rollback.timer >/dev/null 2>&1 || true
-  systemctl --user stop omarchy-display-manager-rollback.service >/dev/null 2>&1 || true
-  systemctl --user reset-failed omarchy-display-manager-rollback.service >/dev/null 2>&1 || true
+  systemctl --user stop omarchy-display-settings-rollback.timer >/dev/null 2>&1 || true
+  systemctl --user stop omarchy-display-settings-rollback.service >/dev/null 2>&1 || true
+  systemctl --user reset-failed omarchy-display-settings-rollback.service >/dev/null 2>&1 || true
 }
 
 schedule_rollback() {
   need systemd-run
   cancel_rollback
-  systemd-run --user --quiet --unit=omarchy-display-manager-rollback \
-    --on-active=15s "$plugin_dir/bin/display-manager" rollback >/dev/null
+  systemd-run --user --quiet --unit=omarchy-display-settings-rollback \
+    --on-active=20s "$plugin_dir/bin/display-manager" rollback >/dev/null
 }
 
 restore_pending() {
@@ -203,18 +404,196 @@ preview() {
     rm -f "$pending_file"
     die "Could not schedule automatic rollback: $schedule_error"
   fi
-  printf '{"ok":true,"timeout":15}\n'
+  printf '{"ok":true,"timeout":20}\n'
 }
 
 confirm() {
   cancel_rollback
   rm -f "$pending_file"
+  persist_monitor_rules "$(state)"
   printf '{"ok":true}\n'
 }
 
 revert() {
   cancel_rollback
   restore_pending
+  printf '{"ok":true}\n'
+}
+
+undo_state() {
+  if [[ -s $undo_file ]] && jq -e 'type == "array" and length > 0' "$undo_file" >/dev/null 2>&1; then
+    printf '{"available":true}\n'
+  else
+    printf '{"available":false}\n'
+  fi
+}
+
+night_light_schedule_state() {
+  if [[ -s $settings_file ]] && jq -e '
+      .version == 1
+      and (.nightLight.schedule | type) == "object"
+      and (.nightLight.schedule.enabled | type) == "boolean"
+      and (.nightLight.schedule.start | type) == "string"
+      and (.nightLight.schedule.end | type) == "string"
+      and (.nightLight.schedule.temperature | type) == "number"
+    ' "$settings_file" >/dev/null 2>&1; then
+    jq -c '.nightLight.schedule' "$settings_file"
+  elif [[ -s $legacy_night_light_schedule_file ]] && jq -e '
+      type == "object"
+      and (.enabled | type) == "boolean"
+      and (.start | type) == "string"
+      and (.end | type) == "string"
+      and (.temperature | type) == "number"
+    ' "$legacy_night_light_schedule_file" >/dev/null 2>&1; then
+    jq -c '.' "$legacy_night_light_schedule_file"
+  else
+    printf '{"enabled":false,"start":"20:00","end":"07:00","temperature":4000}\n'
+  fi
+}
+
+night_light_schedule_set() {
+  local request=${1:-}
+  [[ -n $request ]] || die "night-light-schedule-set requires a JSON configuration"
+  jq -e '
+    type == "object"
+    and (.enabled | type) == "boolean"
+    and (.start | type) == "string"
+    and (.start | test("^([01][0-9]|2[0-3]):[0-5][0-9]$"))
+    and (.end | type) == "string"
+    and (.end | test("^([01][0-9]|2[0-3]):[0-5][0-9]$"))
+    and .start != .end
+    and (.temperature | type) == "number"
+    and (.temperature | floor) == .temperature
+    and .temperature >= 2500 and .temperature <= 5500
+  ' <<<"$request" >/dev/null || die "Invalid Night Light schedule"
+
+  need systemctl
+  local enabled start end temperature config_root config_file backup_file config_tmp settings_tmp settings_base schedule
+  enabled=$(jq -r '.enabled' <<<"$request")
+  start=$(jq -r '.start' <<<"$request")
+  end=$(jq -r '.end' <<<"$request")
+  temperature=$(jq -r '.temperature' <<<"$request")
+  config_root=${XDG_CONFIG_HOME:-$HOME/.config}/hypr
+  config_file=$config_root/hyprsunset.conf
+  backup_file=$config_file.pre-display-settings
+  mkdir -p "$config_root"
+
+  if [[ $enabled == true ]]; then
+    [[ ! -e $config_file || -e $backup_file ]] || cp -a "$config_file" "$backup_file"
+    config_tmp=$(mktemp "$config_root/hyprsunset.XXXXXX")
+    cat >"$config_tmp" <<EOF
+# Managed by Omarchy Display Settings.
+# The previous configuration is preserved at hyprsunset.conf.pre-display-settings.
+profile {
+    time = $end
+    identity = true
+}
+
+profile {
+    time = $start
+    temperature = $temperature
+}
+EOF
+    [[ ! -e $config_file ]] || chmod --reference="$config_file" "$config_tmp"
+    mv "$config_tmp" "$config_file"
+    # Replace any manually-launched instance before starting the persistent
+    # service, otherwise both compete for Hyprland's single CTM manager.
+    pkill -x hyprsunset >/dev/null 2>&1 || true
+    systemctl --user reset-failed hyprsunset.service >/dev/null 2>&1 || true
+    systemctl --user enable hyprsunset.service >/dev/null 2>&1 \
+      || die "Could not enable the Night Light schedule"
+    systemctl --user restart hyprsunset.service >/dev/null 2>&1 \
+      || die "Could not restart Night Light with the new schedule"
+  else
+    systemctl --user disable --now hyprsunset.service >/dev/null 2>&1 \
+      || die "Could not disable the Night Light schedule"
+    pkill -x hyprsunset >/dev/null 2>&1 || true
+    if [[ -e $backup_file ]]; then
+      cp -a "$backup_file" "$config_file"
+    elif [[ ! -e $config_file ]]; then
+      cat >"$config_file" <<'EOF'
+# Makes hyprsunset do nothing to the screen by default.
+profile {
+    time = 07:00
+    identity = true
+}
+EOF
+    fi
+  fi
+
+  schedule=$(jq -cn --argjson enabled "$enabled" --arg start "$start" --arg end "$end" \
+    --argjson temperature "$temperature" \
+    '{enabled:$enabled,start:$start,end:$end,temperature:$temperature}')
+  settings_base='{"version":1}'
+  if [[ -s $settings_file ]] && jq -e 'type == "object"' "$settings_file" >/dev/null 2>&1; then
+    settings_base=$(<"$settings_file")
+  fi
+  mkdir -p "$(dirname "$settings_file")"
+  settings_tmp=$(mktemp "$(dirname "$settings_file")/settings.XXXXXX")
+  jq --argjson schedule "$schedule" '.version = 1 | .nightLight.schedule = $schedule' \
+    <<<"$settings_base" >"$settings_tmp"
+  mv "$settings_tmp" "$settings_file"
+  rm -f "$legacy_night_light_schedule_file"
+  command -v omarchy-shell >/dev/null 2>&1 && omarchy-shell -q nightlight refresh || true
+  night_light_schedule_state
+}
+
+apply_now() {
+  local config=${1:-} snapshot_tmp apply_error schedule_error
+  [[ -n $config ]] || die "apply requires a JSON configuration"
+  validate_config "$config"
+  snapshot_tmp=$(mktemp "$state_root/pending.XXXXXX")
+  state >"$snapshot_tmp"
+  mv "$snapshot_tmp" "$pending_file"
+  if ! apply_error=$(apply_config "$config" 2>&1); then
+    if ! (apply_config "$(<"$pending_file")") >/dev/null 2>&1; then
+      die "Apply failed and the previous layout could not be restored; the recovery snapshot remains at $pending_file"
+    fi
+    rm -f "$pending_file"
+    printf '%s\n' "$apply_error" >&2
+    return 1
+  fi
+  if ! schedule_error=$(schedule_rollback 2>&1); then
+    if ! (apply_config "$(<"$pending_file")") >/dev/null 2>&1; then
+      die "Automatic rollback could not be scheduled and the previous layout could not be restored; the recovery snapshot remains at $pending_file"
+    fi
+    rm -f "$pending_file"
+    die "Could not schedule automatic rollback: $schedule_error"
+  fi
+  cancel_rollback
+  mv "$pending_file" "$undo_file"
+  persist_monitor_rules "$config"
+  profiles_save Default "$config" true >/dev/null
+  printf '{"ok":true,"undo":true}\n'
+}
+
+undo_last() {
+  [[ -s $undo_file ]] || die "There is no display change to undo"
+  local target current_tmp apply_error schedule_error
+  target=$(<"$undo_file")
+  validate_config "$target"
+  current_tmp=$(mktemp "$state_root/pending.XXXXXX")
+  state >"$current_tmp"
+  mv "$current_tmp" "$pending_file"
+  if ! apply_error=$(apply_config "$target" 2>&1); then
+    if ! (apply_config "$(<"$pending_file")") >/dev/null 2>&1; then
+      die "Undo failed and the current layout could not be restored; the recovery snapshot remains at $pending_file"
+    fi
+    rm -f "$pending_file"
+    printf '%s\n' "$apply_error" >&2
+    return 1
+  fi
+  if ! schedule_error=$(schedule_rollback 2>&1); then
+    if ! (apply_config "$(<"$pending_file")") >/dev/null 2>&1; then
+      die "Automatic rollback could not be scheduled and the current layout could not be restored; the recovery snapshot remains at $pending_file"
+    fi
+    rm -f "$pending_file"
+    die "Could not schedule automatic rollback: $schedule_error"
+  fi
+  cancel_rollback
+  rm -f "$pending_file" "$undo_file"
+  persist_monitor_rules "$target"
+  profiles_save Default "$target" true >/dev/null
   printf '{"ok":true}\n'
 }
 
@@ -263,26 +642,44 @@ profiles_apply() {
 }
 
 profiles_match() {
+  if [[ -f $pending_file ]]; then
+    printf '{"ok":true,"matched":false,"pending":true}\n'
+    return
+  fi
   ensure_profiles
-  local key config name snapshot apply_error
+  local key config target name snapshot apply_error
   key=$(topology)
   config=$(jq -c --arg key "$key" '[.profiles[] | select(.topology==$key and .automatic==true)][0] // empty' "$profiles_file")
   [[ -n $config ]] || { printf '{"ok":true,"matched":false}\n'; return; }
   name=$(jq -r '.name' <<<"$config")
+  target=$(jq -c '.displays' <<<"$config")
   snapshot=$(state)
-  if ! apply_error=$(apply_config "$(jq -c '.displays' <<<"$config")" 2>&1); then
+  if config_matches_state "$target" "$snapshot"; then
+    persist_monitor_rules "$target"
+    jq -cn --arg name "$name" '{ok:true,matched:false,unchanged:true,name:$name}'
+    return
+  fi
+  if ! apply_error=$(apply_config "$target" 2>&1); then
     if ! (apply_config "$snapshot") >/dev/null 2>&1; then
       die "Automatic profile failed and the previous layout could not be restored"
     fi
     printf '%s\n' "$apply_error" >&2
     return 1
   fi
+  persist_monitor_rules "$target"
   jq -cn --arg name "$name" '{ok:true,matched:true,name:$name}'
 }
 
 case ${1:-help} in
   state) state ;;
   topology) topology ;;
+  brightness-state) brightness_state ;;
+  undo-state) undo_state ;;
+  night-light-set) night_light_set "${2:-}" ;;
+  night-light-schedule-state) night_light_schedule_state ;;
+  night-light-schedule-set) night_light_schedule_set "${2:-}" ;;
+  apply) apply_now "${2:-}" ;;
+  undo) undo_last ;;
   preview) preview "${2:-}" ;;
   confirm) confirm ;;
   revert) revert ;;
@@ -292,5 +689,5 @@ case ${1:-help} in
   profiles-delete) profiles_delete "${2:-}" ;;
   profiles-apply) profiles_apply "${2:-}" ;;
   profiles-match) profiles_match ;;
-  *) printf 'Usage: %s {state|preview JSON|confirm|revert|profiles-list|profiles-save NAME JSON AUTO|profiles-delete NAME|profiles-apply NAME|profiles-match}\n' "$0" ;;
+  *) printf 'Usage: %s {state|brightness-state|undo-state|night-light-set TEMPERATURE|night-light-schedule-state|night-light-schedule-set JSON|apply JSON|undo|preview JSON|confirm|revert|profiles-list|profiles-save NAME JSON AUTO|profiles-delete NAME|profiles-apply NAME|profiles-match}\n' "$0" ;;
 esac

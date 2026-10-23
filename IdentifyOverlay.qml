@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Wayland
 import qs.Commons
+import "DisplayModel.js" as DisplayModel
 
 Item {
   id: root
@@ -34,8 +35,8 @@ Item {
 
       Rectangle {
         anchors.centerIn: parent
-        width: Style.space(180)
-        height: Style.space(130)
+        width: Math.max(Style.space(220), nameText.implicitWidth + Style.space(40))
+        height: Style.space(140)
         radius: Style.cornerRadius * 2
         color: Color.popups.background
         border.color: Color.accent
@@ -45,11 +46,12 @@ Item {
           for (var i = 0; i < root.displays.length; i++) if (root.displays[i].name === modelData.name) return i
           return -1
         }
+        property var display: displayIndex >= 0 ? root.displays[displayIndex] : null
         Column {
           anchors.centerIn: parent
           spacing: Style.space(6)
           Text { anchors.horizontalCenter: parent.horizontalCenter; text: parent.parent.displayIndex >= 0 ? String(parent.parent.displayIndex + 1) : "?"; color: Color.foreground; font.family: Style.font.family; font.pixelSize: Style.space(58); font.bold: true }
-          Text { anchors.horizontalCenter: parent.horizontalCenter; text: modelData.name; color: Qt.darker(Color.foreground, 1.3); font.family: Style.font.family; font.pixelSize: Style.font.body }
+          Text { id: nameText; anchors.horizontalCenter: parent.horizontalCenter; text: parent.parent.display ? DisplayModel.friendlyName(parent.parent.display) : modelData.name; color: Qt.darker(Color.foreground, 1.3); font.family: Style.font.family; font.pixelSize: Style.font.body }
         }
       }
     }

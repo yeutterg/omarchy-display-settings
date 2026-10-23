@@ -2,6 +2,21 @@
 
 function clone(value) { return JSON.parse(JSON.stringify(value)) }
 
+function friendlyName(display) {
+  if (!display) return "Display"
+  var connector = String(display.name || "")
+  var make = String(display.make || "")
+  var model = String(display.model || "")
+  var description = String(display.description || "")
+  if (/^eDP(?:-|$)/i.test(connector)) return "Built-in Display"
+  if (/apple/i.test(make + " " + description)
+      && /studio\s*display/i.test(model + " " + description))
+    return "Apple Studio Display"
+  if (model && !/^(unknown|display|monitor)$/i.test(model))
+    return model.replace(/([a-z])([A-Z])/g, "$1 $2")
+  return description || connector || "Display"
+}
+
 function modeParts(mode) {
   var match = String(mode || "").match(/^(\d+)x(\d+)@(\d+(?:\.\d+)?)/)
   return match ? { width: Number(match[1]), height: Number(match[2]), refresh: Number(match[3]) } : null
@@ -93,6 +108,28 @@ function hasOverlap(displays) {
   return false
 }
 
+function touches(a, b) {
+  if (a.disabled || b.disabled || a.mirror || b.mirror) return false
+  var as = logicalSize(a), bs = logicalSize(b)
+  var verticalSpan = a.y < b.y + bs.height && a.y + as.height > b.y
+  var horizontalSpan = a.x < b.x + bs.width && a.x + as.width > b.x
+  return (verticalSpan && (a.x + as.width === b.x || b.x + bs.width === a.x))
+      || (horizontalSpan && (a.y + as.height === b.y || b.y + bs.height === a.y))
+}
+
+function isConnected(displays) {
+  var active = (displays || []).filter(function(d) { return !d.disabled && !d.mirror })
+  if (active.length <= 1) return true
+  var visited = [0]
+  for (var cursor = 0; cursor < visited.length; cursor++) {
+    for (var candidate = 0; candidate < active.length; candidate++) {
+      if (visited.indexOf(candidate) < 0 && touches(active[visited[cursor]], active[candidate]))
+        visited.push(candidate)
+    }
+  }
+  return visited.length === active.length
+}
+
 function normalizePositions(displays) {
   var copy = clone(displays), minX = Infinity, minY = Infinity
   copy.forEach(function(d) {
@@ -103,6 +140,67 @@ function normalizePositions(displays) {
     if (!d.disabled && !d.mirror) { d.x -= minX; d.y -= minY }
   })
   return copy
+}
+
+function nearestAxis(value, candidates, threshold) {
+  var best = value, distance = threshold + 1
+  candidates.forEach(function(candidate) {
+    var delta = Math.abs(value - candidate)
+    if (delta < distance) { best = candidate; distance = delta }
+  })
+  return distance <= threshold ? best : value
+}
+
+function clamp(value, minimum, maximum) {
+  return Math.max(minimum, Math.min(maximum, value))
+}
+
+// Mandatory edge attachment for the visual canvas. Every candidate shares a
+// useful stretch of one edge with another display, and candidates that would
+// overlap any display are rejected. Alignment remains magnetic near matching
+// top/centre/bottom or left/centre/right positions.
+function snapPosition(displays, index, wantedX, wantedY, threshold) {
+  var current = displays[index]
+  if (!current || current.disabled || current.mirror) return { x: wantedX, y: wantedY }
+  var size = logicalSize(current)
+  var best = null
+
+  function consider(x, y) {
+    var candidateX = Math.round(x), candidateY = Math.round(y)
+    var copy = clone(displays)
+    copy[index].x = candidateX
+    copy[index].y = candidateY
+    if (hasOverlap(copy) || !isConnected(copy)) return
+    var dx = candidateX - wantedX, dy = candidateY - wantedY
+    var distance = dx * dx + dy * dy
+    if (!best || distance < best.distance)
+      best = { x: candidateX, y: candidateY, distance: distance }
+  }
+
+  displays.forEach(function(other, otherIndex) {
+    if (otherIndex === index || other.disabled || other.mirror) return
+    var otherSize = logicalSize(other)
+    var sharedY = Math.max(1, Math.min(80, size.height, otherSize.height))
+    var minY = other.y - size.height + sharedY
+    var maxY = other.y + otherSize.height - sharedY
+    var alignedY = nearestAxis(wantedY, [other.y, other.y + (otherSize.height - size.height) / 2, other.y + otherSize.height - size.height], threshold)
+    var yChoices = [clamp(alignedY, minY, maxY), minY, maxY]
+    ;[other.x - size.width, other.x + otherSize.width].forEach(function(x) {
+      yChoices.forEach(function(y) { consider(x, y) })
+    })
+
+    var sharedX = Math.max(1, Math.min(80, size.width, otherSize.width))
+    var minX = other.x - size.width + sharedX
+    var maxX = other.x + otherSize.width - sharedX
+    var alignedX = nearestAxis(wantedX, [other.x, other.x + (otherSize.width - size.width) / 2, other.x + otherSize.width - size.width], threshold)
+    var xChoices = [clamp(alignedX, minX, maxX), minX, maxX]
+    ;[other.y - size.height, other.y + otherSize.height].forEach(function(y) {
+      xChoices.forEach(function(x) { consider(x, y) })
+    })
+  })
+
+  if (best) return { x: best.x, y: best.y }
+  return { x: Math.round(current.x), y: Math.round(current.y) }
 }
 
 function nearestMode(modes, wantedResolution, wantedRefresh) {

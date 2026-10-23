@@ -1,3 +1,4 @@
 *.log
 .qmllint.ini.user
 test-results/
+/settings.json
