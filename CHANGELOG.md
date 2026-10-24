@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.6.2
+
+- Extend manual and scheduled Night Light controls down to 1600 K.
+
 ## 1.6.1
 
 - Save Night Light schedule preferences in the plugin's gitignored

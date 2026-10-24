@@ -158,7 +158,7 @@ Panel {
   }
 
   function applyNightLightTemperature(temperature) {
-    var target = Math.max(2500, Math.min(6500, Math.round(Number(temperature) / 100) * 100))
+    var target = Math.max(1600, Math.min(6500, Math.round(Number(temperature) / 100) * 100))
     nightLightTemperature = target
     nightLightLoaded = true
     if (target < 6000) nightLightPreferredTemperature = Math.min(5500, target)
@@ -175,7 +175,7 @@ Panel {
   }
 
   function setNightLightTemperature(temperature) {
-    var target = Math.max(2500, Math.min(5500, Math.round(Number(temperature) / 100) * 100))
+    var target = Math.max(1600, Math.min(5500, Math.round(Number(temperature) / 100) * 100))
     nightLightPreferredTemperature = target
     applyNightLightTemperature(target)
     if (nightLightScheduleEnabled) saveNightLightSchedule()
@@ -418,7 +418,7 @@ Panel {
         root.nightLightTemperature = Math.round(temperature)
         root.nightLightLoaded = true
         if (temperature < 6000)
-          root.nightLightPreferredTemperature = Math.max(2500, Math.min(5500, Math.round(temperature / 100) * 100))
+          root.nightLightPreferredTemperature = Math.max(1600, Math.min(5500, Math.round(temperature / 100) * 100))
       }
     }
     onExited: function(exitCode) {
@@ -452,7 +452,7 @@ Panel {
         root.nightLightScheduleEnabled = parsed.enabled
         root.nightLightScheduleStart = String(parsed.start || "20:00")
         root.nightLightScheduleEnd = String(parsed.end || "07:00")
-        if (parsed.enabled && Number(parsed.temperature) >= 2500 && Number(parsed.temperature) <= 5500)
+        if (parsed.enabled && Number(parsed.temperature) >= 1600 && Number(parsed.temperature) <= 5500)
           root.nightLightPreferredTemperature = Number(parsed.temperature)
         root.nightLightScheduleLoaded = true
       }
@@ -816,11 +816,11 @@ Panel {
                   anchors.leftMargin: Style.space(6)
                   anchors.rightMargin: Style.space(6)
                   bar: root.bar
-                  minimum: 2500
+                  minimum: 1600
                   maximum: 5500
                   step: 100
                   integer: true
-                  tickCount: 7
+                  tickCount: 9
                   value: root.nightLightPreferredTemperature
                   onReleased: function(value) { root.setNightLightTemperature(value) }
                 }

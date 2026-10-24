@@ -201,27 +201,33 @@ $helper night-light-schedule-state | jq -e '
   .enabled == false and .start == "19:30" and .end == "06:30" and .temperature == 3800' >/dev/null
 $helper night-light-set 4000 | jq -e '.ok == true and .enabled == true and .temperature == 4000' >/dev/null
 [[ $(<"$TEST_NIGHT_TEMP") == 4000 ]]
+$helper night-light-set 1600 | jq -e '.ok == true and .enabled == true and .temperature == 1600' >/dev/null
+[[ $(<"$TEST_NIGHT_TEMP") == 1600 ]]
 $helper night-light-set 6500 | jq -e '.ok == true and .enabled == false and .temperature == 6500' >/dev/null
+if $helper night-light-set 1500 >/dev/null 2>&1; then
+  echo "Expected a below-minimum Night Light temperature to fail" >&2
+  exit 1
+fi
 if $helper night-light-set 7000 >/dev/null 2>&1; then
   echo "Expected an invalid Night Light temperature to fail" >&2
   exit 1
 fi
 original_sunset=$(sha256sum "$XDG_CONFIG_HOME/hypr/hyprsunset.conf" | cut -d' ' -f1)
-schedule='{"enabled":true,"start":"21:30","end":"06:45","temperature":3600}'
+schedule='{"enabled":true,"start":"21:30","end":"06:45","temperature":1600}'
 $helper night-light-schedule-set "$schedule" | jq -e '
-  .enabled == true and .start == "21:30" and .end == "06:45" and .temperature == 3600' >/dev/null
+  .enabled == true and .start == "21:30" and .end == "06:45" and .temperature == 1600' >/dev/null
 [[ ! -e $XDG_STATE_HOME/omarchy-display-settings/night-light-schedule.json ]]
 jq -e '.version == 1 and .nightLight.schedule == {
-  enabled:true,start:"21:30",end:"06:45",temperature:3600
+  enabled:true,start:"21:30",end:"06:45",temperature:1600
 }' "$DISPLAY_MANAGER_SETTINGS_FILE" >/dev/null
 grep -Fqx '    time = 21:30' "$XDG_CONFIG_HOME/hypr/hyprsunset.conf"
 grep -Fqx '    time = 06:45' "$XDG_CONFIG_HOME/hypr/hyprsunset.conf"
-grep -Fqx '    temperature = 3600' "$XDG_CONFIG_HOME/hypr/hyprsunset.conf"
+grep -Fqx '    temperature = 1600' "$XDG_CONFIG_HOME/hypr/hyprsunset.conf"
 [[ -f $XDG_CONFIG_HOME/hypr/hyprsunset.conf.pre-display-settings ]]
 grep -Fqx -- '--user enable hyprsunset.service' "$TEST_SYSTEMCTL_CALLS"
 grep -Fqx -- '--user reset-failed hyprsunset.service' "$TEST_SYSTEMCTL_CALLS"
 grep -Fqx -- '--user restart hyprsunset.service' "$TEST_SYSTEMCTL_CALLS"
-$helper night-light-schedule-set '{"enabled":false,"start":"21:30","end":"06:45","temperature":3600}' >/dev/null
+$helper night-light-schedule-set '{"enabled":false,"start":"21:30","end":"06:45","temperature":1600}' >/dev/null
 [[ $(sha256sum "$XDG_CONFIG_HOME/hypr/hyprsunset.conf" | cut -d' ' -f1) == "$original_sunset" ]]
 grep -Fqx -- '--user disable --now hyprsunset.service' "$TEST_SYSTEMCTL_CALLS"
 

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.yeutterg.display-settings",
   "name": "Display Settings",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "author": "Greg Yeutter; based on Omarchy Display Manager by Bryan Montgomery",
   "license": "MIT",
   "description": "The Omarchy Display panel with visual monitor arrangement, per-display controls, and safe automatic profiles.",

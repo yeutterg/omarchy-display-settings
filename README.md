@@ -26,7 +26,7 @@ Display-panel role, then adds per-display brightness and UI/text scale controls.
 - Put every connected display's brightness control at the top of a compact,
   native Omarchy-style panel.
 - Move Night Light into the Display panel with an immediate on/off control and
-  expandable color-temperature and daily schedule controls.
+  expandable 1600–5500 K color-temperature and daily schedule controls.
 - Keep the visual arrangement canvas collapsed until needed, followed by a
   separate settings section for each connected display.
 - Control UI and text size independently through each display's compositor

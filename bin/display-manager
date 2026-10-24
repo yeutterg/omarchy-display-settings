@@ -141,8 +141,8 @@ night_light_temperature() {
 
 night_light_set() {
   local target=${1:-}
-  [[ $target =~ ^[0-9]+$ ]] && (( target >= 2500 && target <= 6500 )) \
-    || die "Night Light temperature must be between 2500 and 6500 K"
+  [[ $target =~ ^[0-9]+$ ]] && (( target >= 1600 && target <= 6500 )) \
+    || die "Night Light temperature must be between 1600 and 6500 K"
 
   if ! night_light_temperature >/dev/null; then
     # Only one hyprsunset process may own Hyprland's CTM manager. A process can
@@ -464,7 +464,7 @@ night_light_schedule_set() {
     and .start != .end
     and (.temperature | type) == "number"
     and (.temperature | floor) == .temperature
-    and .temperature >= 2500 and .temperature <= 5500
+    and .temperature >= 1600 and .temperature <= 5500
   ' <<<"$request" >/dev/null || die "Invalid Night Light schedule"
 
   need systemctl
